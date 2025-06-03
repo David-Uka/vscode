@@ -1,121 +1,88 @@
+# File: .github/workflows/basic-checks.yml
 name: Basic checks
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    # (You can later add push/pr triggers if desired)
+    # push:
+    #   branches:
+    #     - main
+    # pull_request:
+    #   branches:
+    #     - main
+
 permissions: {}
 
-# on:
-#   push:
-#     branches:
-#       - main
-#   pull_request:
-#     branches:
-#       - main
-
 jobs:
-  main:
+  setup:
+    name: Setup & Cache
+    runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.cache_node.outputs.cache-hit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Node Cache (composite action)
+        id: cache_node
+        uses: ./.github/actions/node-cache
+        with:
+          node-version-file: .nvmrc
+
+      - name: Upload Node setup artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v3
+        with:
+          name: node-setup
+          path: |
+            ~/.npm
+            ~/.cache
+            # Add other files if you need to reuse more from setup
+
+  compile-and-test:
+    needs: setup
     if: github.ref != 'refs/heads/main'
     name: Compilation, Unit and Integration Tests
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Download Node setup artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: node-setup
+          path: ~
+
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      # TODO: rename azure-pipelines/linux/xvfb.init to github-actions
-      - name: Setup Build Environment
-        run: |
-          sudo cp build/azure-pipelines/linux/xvfb.init /etc/init.d/xvfb
-          sudo chmod +x /etc/init.d/xvfb
-          sudo update-rc.d xvfb defaults
-          sudo service xvfb start
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-
-      - name: Compute node modules cache key
-        id: nodeModulesCacheKey
-        run: echo "value=$(node build/azure-pipelines/common/computeNodeModulesCacheKey.js)" >> $GITHUB_OUTPUT
-      - name: Cache node modules
-        id: cacheNodeModules
-        uses: actions/cache@v4
-        with:
-          path: "**/node_modules"
-          key: ${{ runner.os }}-cacheNodeModulesLinux-${{ steps.nodeModulesCacheKey.outputs.value }}
-      - name: Get npm cache directory path
-        id: npmCacheDirPath
-        if: ${{ steps.cacheNodeModules.outputs.cache-hit != 'true' }}
-        run: echo "dir=$(npm config get cache)" >> $GITHUB_OUTPUT
-      - name: Cache npm directory
-        if: ${{ steps.cacheNodeModules.outputs.cache-hit != 'true' }}
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.npmCacheDirPath.outputs.dir }}
-          key: ${{ runner.os }}-npmCacheDir-${{ steps.nodeModulesCacheKey.outputs.value }}
-          restore-keys: ${{ runner.os }}-npmCacheDir-
-      - name: Execute npm
-        if: ${{ steps.cacheNodeModules.outputs.cache-hit != 'true' }}
-        env:
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
-        run: npm ci
-
-      - name: Compile and Download
+      # Build steps don’t need to re-run npm ci if cache hit
+      - name: Compile & Download
         run: npm exec -- npm-run-all -lp compile "electron x64"
 
-      - name: Run Unit Tests
-        id: electron-unit-tests
-        run: DISPLAY=:10 ./scripts/test.sh
+      - name: Run Unit Tests (Electron)
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" ./scripts/test.sh
 
       - name: Run Integration Tests (Electron)
-        id: electron-integration-tests
-        run: DISPLAY=:10 ./scripts/test-integration.sh
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" ./scripts/test-integration.sh
 
   hygiene:
+    needs: setup
     if: github.ref != 'refs/heads/main'
     name: Hygiene and Layering
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Download Node setup artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: node-setup
+          path: ~
+
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-
-      - name: Compute node modules cache key
-        id: nodeModulesCacheKey
-        run: echo "value=$(node build/azure-pipelines/common/computeNodeModulesCacheKey.js)" >> $GITHUB_OUTPUT
-      - name: Cache node modules
-        id: cacheNodeModules
-        uses: actions/cache@v4
-        with:
-          path: "**/node_modules"
-          key: ${{ runner.os }}-cacheNodeModulesLinux-${{ steps.nodeModulesCacheKey.outputs.value }}
-      - name: Get npm cache directory path
-        id: npmCacheDirPath
-        if: ${{ steps.cacheNodeModules.outputs.cache-hit != 'true' }}
-        run: echo "dir=$(npm config get cache)" >> $GITHUB_OUTPUT
-      - name: Cache npm directory
-        if: ${{ steps.cacheNodeModules.outputs.cache-hit != 'true' }}
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.npmCacheDirPath.outputs.dir }}
-          key: ${{ runner.os }}-npmCacheDir-${{ steps.nodeModulesCacheKey.outputs.value }}
-          restore-keys: ${{ runner.os }}-npmCacheDir-
-      - name: Execute npm
-        if: ${{ steps.cacheNodeModules.outputs.cache-hit != 'true' }}
-        env:
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
-        run: npm ci
 
       - name: Run Hygiene Checks
         run: npm run gulp hygiene
@@ -133,54 +100,28 @@ jobs:
       - name: Check clean git state
         run: ./.github/workflows/check-clean-git-state.sh
 
-      - name: Run eslint
+      - name: Run ESLint
         run: npm run eslint
 
-      - name: Run vscode-dts Compile Checks
+      - name: Run VSCode DTS Compile Checks
         run: npm run vscode-dts-compile-check
 
       - name: Run Trusted Types Checks
         run: npm run tsec-compile-check
 
-  warm-cache:
-    name: Warm up node modules cache
+  sanity-on-main:
     if: github.ref == 'refs/heads/main'
+    name: Sanity Check on main
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node (lockfile hash-based cache)
+        uses: ./.github/actions/node-cache
         with:
           node-version-file: .nvmrc
 
-      - name: Compute node modules cache key
-        id: nodeModulesCacheKey
-        run: echo "value=$(node build/azure-pipelines/common/computeNodeModulesCacheKey.js)" >> $GITHUB_OUTPUT
-      - name: Cache node modules
-        id: cacheNodeModules
-        uses: actions/cache@v4
-        with:
-          path: "**/node_modules"
-          key: ${{ runner.os }}-cacheNodeModulesLinux-${{ steps.nodeModulesCacheKey.outputs.value }}
-      - name: Get npm cache directory path
-        id: npmCacheDirPath
-        if: ${{ steps.cacheNodeModules.outputs.cache-hit != 'true' }}
-        run: echo "dir=$(npm config get cache)" >> $GITHUB_OUTPUT
-      - name: Cache npm directory
-        if: ${{ steps.cacheNodeModules.outputs.cache-hit != 'true' }}
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.npmCacheDirPath.outputs.dir }}
-          key: ${{ runner.os }}-npmCacheDir-${{ steps.nodeModulesCacheKey.outputs.value }}
-          restore-keys: ${{ runner.os }}-npmCacheDir-
-      - name: Execute npm
-        if: ${{ steps.cacheNodeModules.outputs.cache-hit != 'true' }}
-        env:
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
-        run: npm ci
+      - name: Quick Lint Only
+        run: npm run eslint
